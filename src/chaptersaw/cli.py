@@ -13,6 +13,7 @@ from chaptersaw import __version__
 from chaptersaw.exceptions import (
     ChapterExtractionError,
     FFmpegNotFoundError,
+    UnsupportedFormatError,
 )
 from chaptersaw.extractor import (
     ChapterExtractor,
@@ -149,6 +150,31 @@ def create_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="List all audio, video, and subtitle tracks in input files.",
     )
+    output_mode.add_argument(
+        "--set-default",
+        action="store_true",
+        help="Set default audio/subtitle tracks (use with --audio and/or --subtitle).",
+    )
+
+    # Track selection options (used with --set-default)
+    track_group = parser.add_argument_group("Track selection options")
+    track_group.add_argument(
+        "--audio",
+        metavar="LANG",
+        help="Audio language code to set as default (e.g., 'jpn', 'eng').",
+    )
+    track_group.add_argument(
+        "--subtitle",
+        metavar="LANG",
+        help="Subtitle language code to set as default (e.g., 'eng', 'jpn').",
+    )
+    track_group.add_argument(
+        "--track-id",
+        type=int,
+        metavar="ID",
+        help="Specific track ID to set as default (alternative to language).",
+    )
+
     output_group.add_argument(
         "-d",
         "--output-dir",
@@ -453,8 +479,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.workers and not args.parallel:
         parser.error("--workers can only be used with --parallel")
 
+    # Validate --set-default options
+    if args.set_default:
+        has_audio = args.audio is not None
+        has_subtitle = args.subtitle is not None
+        has_track_id = args.track_id is not None
+        if not has_audio and not has_subtitle and not has_track_id:
+            parser.error("--set-default requires --audio, --subtitle, or --track-id")
+
     # Check if we need a filter (keyword or regex)
-    needs_filter = not args.list_chapters and not args.list_tracks
+    is_info_mode = args.list_chapters or args.list_tracks or args.set_default
+    needs_filter = not is_info_mode
     if needs_filter and not args.keyword and not args.regex:
         parser.error("Either -k/--keyword or -r/--regex is required for extraction")
 
@@ -505,6 +540,42 @@ def main(argv: list[str] | None = None) -> int:
         use_rich = RICH_AVAILABLE and not args.no_progress and not args.quiet
         list_tracks(extractor, input_files, use_rich)
         return 0
+
+    # Set default tracks mode
+    if args.set_default:
+        all_success = True
+        for input_file in input_files:
+            try:
+                if args.track_id is not None:
+                    # Set specific track by ID
+                    extractor.set_default_track(input_file, track_id=args.track_id)
+                    if not args.quiet:
+                        print(f"{input_file.name}: Set track {args.track_id} as default")  # noqa: E501
+                else:
+                    # Set by language
+                    track_result = extractor.set_default_tracks_by_language(
+                        input_file,
+                        audio_language=args.audio,
+                        subtitle_language=args.subtitle,
+                    )
+                    if not args.quiet:
+                        changes = []
+                        if track_result["audio"]:
+                            changes.append(f"audio={args.audio}")
+                        if track_result["subtitle"]:
+                            changes.append(f"subtitle={args.subtitle}")
+                        if changes:
+                            msg = f"{input_file.name}: Set default {', '.join(changes)}"
+                            print(msg)
+                        else:
+                            print(f"{input_file.name}: No matching tracks found")
+            except UnsupportedFormatError as e:
+                logger.error(f"{input_file.name}: {e}")
+                all_success = False
+            except ChapterExtractionError as e:
+                logger.error(f"{input_file.name}: {e}")
+                all_success = False
+        return 0 if all_success else 1
 
     # Dry run mode
     if args.dry_run:

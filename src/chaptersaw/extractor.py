@@ -43,10 +43,12 @@ class ChapterExtractor:
     - Filter chapters by title keywords
     - Extract chapter segments
     - Merge segments into output files
+    - Modify track properties (default flags, etc.)
 
     Attributes:
         ffmpeg_path: Path to the ffmpeg executable.
         ffprobe_path: Path to the ffprobe executable.
+        mkvpropedit_path: Path to the mkvpropedit executable (optional).
         temp_dir: Temporary directory for intermediate files.
 
     Example:
@@ -60,6 +62,7 @@ class ChapterExtractor:
         self,
         ffmpeg_path: str | Path = "ffmpeg",
         ffprobe_path: str | Path = "ffprobe",
+        mkvpropedit_path: str | Path = "mkvpropedit",
         temp_dir: Path | None = None,
     ) -> None:
         """Initialize the ChapterExtractor.
@@ -69,6 +72,8 @@ class ChapterExtractor:
                 (assumes it's in PATH).
             ffprobe_path: Path to the ffprobe executable. Defaults to "ffprobe"
                 (assumes it's in PATH).
+            mkvpropedit_path: Path to the mkvpropedit executable. Defaults to
+                "mkvpropedit" (assumes it's in PATH). Optional for MKV editing.
             temp_dir: Directory for temporary files. If None, uses system temp.
 
         Raises:
@@ -76,7 +81,9 @@ class ChapterExtractor:
         """
         self.ffmpeg_path = Path(ffmpeg_path)
         self.ffprobe_path = Path(ffprobe_path)
+        self.mkvpropedit_path = Path(mkvpropedit_path)
         self._temp_dir = temp_dir
+        self._mkvpropedit_available: bool | None = None
         self._validate_dependencies()
 
     def _validate_dependencies(self) -> None:
@@ -236,6 +243,190 @@ class ChapterExtractor:
             tracks.append(track)
 
         return tracks
+
+    def _is_mkvpropedit_available(self) -> bool:
+        """Check if mkvpropedit is available."""
+        if self._mkvpropedit_available is None:
+            try:
+                subprocess.run(
+                    [str(self.mkvpropedit_path), "--version"],
+                    capture_output=True,
+                    check=True,
+                )
+                self._mkvpropedit_available = True
+            except (subprocess.CalledProcessError, FileNotFoundError):
+                self._mkvpropedit_available = False
+        return self._mkvpropedit_available
+
+    def set_default_track(
+        self,
+        input_file: str | Path,
+        track_id: int | None = None,
+        track_type: str | None = None,
+        language: str | None = None,
+    ) -> None:
+        """Set the default track for a specific track type in an MKV file.
+
+        This modifies the file in-place using mkvpropedit. You can specify
+        the track by ID, or by type and language.
+
+        Args:
+            input_file: Path to the MKV file to modify.
+            track_id: Specific track ID to set as default. If provided,
+                track_type and language are ignored.
+            track_type: Type of track ('audio' or 'subtitles'). Used with
+                language to find matching track.
+            language: Language code (e.g., 'jpn', 'eng') to match.
+
+        Raises:
+            ChapterExtractionError: If modification fails or no matching track found.
+            UnsupportedFormatError: If file is not MKV format.
+
+        Example:
+            >>> extractor.set_default_track("video.mkv", track_id=2)
+            >>> extractor.set_default_track(
+            ...     "video.mkv", track_type="audio", language="jpn"
+            ... )
+        """
+        input_path = Path(input_file)
+
+        if not input_path.exists():
+            raise ChapterExtractionError(f"Input file not found: {input_path}")
+
+        if input_path.suffix.lower() != ".mkv":
+            raise UnsupportedFormatError(
+                f"set_default_track only works with MKV files, got: {input_path.suffix}"
+            )
+
+        if not self._is_mkvpropedit_available():
+            raise ChapterExtractionError(
+                "mkvpropedit not found. Please install MKVToolNix to use this feature."
+            )
+
+        # If track_id is provided, use it directly
+        if track_id is not None:
+            target_track_id = track_id
+            # Get tracks to find the type
+            tracks = self.get_tracks(input_path)
+            target_track = next((t for t in tracks if t.id == track_id), None)
+            if target_track is None:
+                raise ChapterExtractionError(f"Track ID {track_id} not found in file")
+            target_type = target_track.type
+        elif track_type and language:
+            # Find track by type and language
+            tracks = self.get_tracks(input_path)
+            matching = [
+                t for t in tracks
+                if t.type == track_type and t.language == language
+            ]
+            if not matching:
+                raise ChapterExtractionError(
+                    f"No {track_type} track with language '{language}' found"
+                )
+            target_track_id = matching[0].id
+            target_type = track_type
+        else:
+            raise ValueError(
+                "Either track_id or both track_type and language must be provided"
+            )
+
+        # Get all tracks of the same type to clear their default flags
+        tracks = self.get_tracks(input_path)
+        same_type_tracks = [t for t in tracks if t.type == target_type]
+
+        # Build mkvpropedit command
+        # First, clear default flag on all tracks of same type
+        # Then set default on target track
+        cmd = [str(self.mkvpropedit_path), str(input_path)]
+
+        for track in same_type_tracks:
+            # mkvpropedit uses 1-based track numbers within each type
+            # But we need to use the actual track selector
+            cmd.extend([
+                "--edit", f"track:={track.id}",
+                "--set", "flag-default=0",
+            ])
+
+        # Set the target track as default
+        cmd.extend([
+            "--edit", f"track:={target_track_id}",
+            "--set", "flag-default=1",
+        ])
+
+        try:
+            subprocess.run(cmd, capture_output=True, check=True)
+        except subprocess.CalledProcessError as e:
+            raise ChapterExtractionError(
+                f"Failed to set default track: {e.stderr.decode()}"
+            ) from e
+
+    def set_default_tracks_by_language(
+        self,
+        input_file: str | Path,
+        audio_language: str | None = None,
+        subtitle_language: str | None = None,
+    ) -> dict[str, int | None]:
+        """Set default audio and/or subtitle tracks by language preference.
+
+        Args:
+            input_file: Path to the MKV file to modify.
+            audio_language: Language code for preferred audio (e.g., 'jpn').
+            subtitle_language: Language code for preferred subtitle (e.g., 'eng').
+
+        Returns:
+            Dictionary with 'audio' and 'subtitle' keys, containing the track IDs
+            that were set as default (or None if not found/changed).
+
+        Raises:
+            ChapterExtractionError: If modification fails.
+            UnsupportedFormatError: If file is not MKV format.
+
+        Example:
+            >>> result = extractor.set_default_tracks_by_language(
+            ...     "video.mkv", audio_language="jpn", subtitle_language="eng"
+            ... )
+            >>> print(result)
+            {'audio': 1, 'subtitle': 3}
+        """
+        result: dict[str, int | None] = {"audio": None, "subtitle": None}
+
+        if audio_language:
+            try:
+                self.set_default_track(
+                    input_file, track_type="audio", language=audio_language
+                )
+                tracks = self.get_tracks(input_file)
+                audio_track = next(
+                    (
+                        t for t in tracks
+                        if t.type == "audio" and t.language == audio_language
+                    ),
+                    None,
+                )
+                if audio_track:
+                    result["audio"] = audio_track.id
+            except ChapterExtractionError:
+                pass  # Track not found, continue
+
+        if subtitle_language:
+            try:
+                self.set_default_track(
+                    input_file, track_type="subtitles", language=subtitle_language
+                )
+                tracks = self.get_tracks(input_file)
+                sub_track = next(
+                    (
+                        t for t in tracks
+                        if t.type == "subtitles" and t.language == subtitle_language
+                    ),
+                    None,
+                )
+                if sub_track:
+                    result["subtitle"] = sub_track.id
+            except ChapterExtractionError:
+                pass  # Track not found, continue
+
+        return result
 
     def filter_chapters_by_keyword(
         self,
