@@ -143,6 +143,12 @@ def create_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="List all chapters in input files without extracting.",
     )
+    output_mode.add_argument(
+        "-t",
+        "--list-tracks",
+        action="store_true",
+        help="List all audio, video, and subtitle tracks in input files.",
+    )
     output_group.add_argument(
         "-d",
         "--output-dir",
@@ -261,6 +267,101 @@ def list_chapters(
                 print(f"  Error: {e}")
 
 
+def list_tracks(
+    extractor: ChapterExtractor, input_files: list[Path], use_rich: bool = True
+) -> None:
+    """List all tracks in the input files."""
+    if use_rich and RICH_AVAILABLE:
+        console = Console()
+
+        for input_file in input_files:
+            try:
+                tracks = extractor.get_tracks(input_file)
+
+                table = Table(title=f"Tracks in {input_file.name}")
+                table.add_column("ID", style="cyan", justify="right")
+                table.add_column("Type", style="green")
+                table.add_column("Codec", style="yellow")
+                table.add_column("Language", style="blue")
+                table.add_column("Name", style="white")
+                table.add_column("Details", style="magenta")
+                table.add_column("Flags", style="red")
+
+                for track in tracks:
+                    # Build details string
+                    details = []
+                    if track.width and track.height:
+                        details.append(f"{track.width}x{track.height}")
+                    if track.channels:
+                        details.append(f"{track.channels}ch")
+                    if track.sample_rate:
+                        details.append(f"{track.sample_rate}Hz")
+
+                    # Build flags string
+                    flags = []
+                    if track.default:
+                        flags.append("default")
+                    if track.forced:
+                        flags.append("forced")
+
+                    table.add_row(
+                        str(track.id),
+                        track.type,
+                        track.codec,
+                        track.language or "-",
+                        track.name or "-",
+                        ", ".join(details) if details else "-",
+                        ", ".join(flags) if flags else "-",
+                    )
+
+                console.print(table)
+                console.print()
+
+            except ChapterExtractionError as e:
+                console.print(f"[red]Error reading {input_file}: {e}[/red]")
+    else:
+        for input_file in input_files:
+            print(f"\nTracks in {input_file.name}:")
+            print("-" * 80)
+
+            try:
+                tracks = extractor.get_tracks(input_file)
+
+                if not tracks:
+                    print("  No tracks found")
+                    continue
+
+                for track in tracks:
+                    # Build details string
+                    details = []
+                    if track.width and track.height:
+                        details.append(f"{track.width}x{track.height}")
+                    if track.channels:
+                        details.append(f"{track.channels}ch")
+                    if track.sample_rate:
+                        details.append(f"{track.sample_rate}Hz")
+
+                    # Build flags string
+                    flags = []
+                    if track.default:
+                        flags.append("default")
+                    if track.forced:
+                        flags.append("forced")
+
+                    lang = f"[{track.language}]" if track.language else ""
+                    name = f'"{track.name}"' if track.name else ""
+                    detail_str = f"({', '.join(details)})" if details else ""
+                    flag_str = f"[{', '.join(flags)}]" if flags else ""
+
+                    print(
+                        f"  {track.id:3d}. {track.type:<10} {track.codec:<12} "
+                        f"{lang:<6} {name:<20} {detail_str} {flag_str}"
+                    )
+
+            except ChapterExtractionError as e:
+                print(f"  Error: {e}")
+
+
 def run_dry_run(
     extractor: ChapterExtractor,
     input_files: list[Path],
@@ -353,7 +454,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--workers can only be used with --parallel")
 
     # Check if we need a filter (keyword or regex)
-    needs_filter = not args.list_chapters
+    needs_filter = not args.list_chapters and not args.list_tracks
     if needs_filter and not args.keyword and not args.regex:
         parser.error("Either -k/--keyword or -r/--regex is required for extraction")
 
@@ -397,6 +498,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.list_chapters:
         use_rich = RICH_AVAILABLE and not args.no_progress and not args.quiet
         list_chapters(extractor, input_files, use_rich)
+        return 0
+
+    # List tracks mode
+    if args.list_tracks:
+        use_rich = RICH_AVAILABLE and not args.no_progress and not args.quiet
+        list_tracks(extractor, input_files, use_rich)
         return 0
 
     # Dry run mode

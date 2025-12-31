@@ -19,7 +19,7 @@ from chaptersaw.exceptions import (
     FFmpegNotFoundError,
     UnsupportedFormatError,
 )
-from chaptersaw.models import Chapter, ExtractionResult
+from chaptersaw.models import Chapter, ExtractionResult, Track
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +151,91 @@ class ChapterExtractor:
             )
 
         return chapters
+
+    def get_tracks(self, input_file: str | Path) -> list[Track]:
+        """Extract track information from a video file.
+
+        Args:
+            input_file: Path to the video file.
+
+        Returns:
+            List of Track objects containing track metadata.
+
+        Raises:
+            ChapterExtractionError: If track extraction fails.
+        """
+        input_path = Path(input_file)
+
+        if not input_path.exists():
+            raise ChapterExtractionError(f"Input file not found: {input_path}")
+
+        cmd = [
+            str(self.ffprobe_path),
+            "-i",
+            str(input_path),
+            "-print_format",
+            "json",
+            "-show_streams",
+            "-loglevel",
+            "error",
+        ]
+
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            data = json.loads(result.stdout)
+        except subprocess.CalledProcessError as e:
+            raise ChapterExtractionError(
+                f"Failed to probe file '{input_path}': {e.stderr}"
+            ) from e
+        except json.JSONDecodeError as e:
+            raise ChapterExtractionError(
+                f"Failed to parse track data from '{input_path}'"
+            ) from e
+
+        tracks = []
+        for stream in data.get("streams", []):
+            codec_type = stream.get("codec_type", "unknown")
+
+            # Map ffprobe codec_type to our track type
+            if codec_type == "video":
+                track_type = "video"
+            elif codec_type == "audio":
+                track_type = "audio"
+            elif codec_type == "subtitle":
+                track_type = "subtitles"
+            else:
+                track_type = codec_type
+
+            # Get language from tags
+            tags = stream.get("tags", {})
+            language = tags.get("language")
+            name = tags.get("title")
+
+            # Get disposition flags
+            disposition = stream.get("disposition", {})
+            is_default = disposition.get("default", 0) == 1
+            is_forced = disposition.get("forced", 0) == 1
+
+            track = Track(
+                id=stream.get("index", 0),
+                type=track_type,
+                codec=stream.get("codec_name", "unknown"),
+                language=language,
+                name=name,
+                default=is_default,
+                forced=is_forced,
+                channels=stream.get("channels") if codec_type == "audio" else None,
+                sample_rate=(
+                    int(stream.get("sample_rate"))
+                    if codec_type == "audio" and stream.get("sample_rate")
+                    else None
+                ),
+                width=stream.get("width") if codec_type == "video" else None,
+                height=stream.get("height") if codec_type == "video" else None,
+            )
+            tracks.append(track)
+
+        return tracks
 
     def filter_chapters_by_keyword(
         self,

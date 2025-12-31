@@ -5,8 +5,8 @@ and more) based on chapter title keywords, with support for merging multiple fil
 """
 
 from chaptersaw.exceptions import (
-    ChaptersawError,
     ChapterExtractionError,
+    ChaptersawError,
     FFmpegNotFoundError,
     UnsupportedFormatError,
 )
@@ -18,7 +18,7 @@ from chaptersaw.extractor import (
     is_supported_format,
     validate_format,
 )
-from chaptersaw.models import Chapter, ExtractionResult
+from chaptersaw.models import Chapter, ExtractionResult, Track
 
 __version__ = "0.1.0"
 __all__ = [
@@ -26,6 +26,7 @@ __all__ = [
     "ChapterExtractor",
     "Chapter",
     "ExtractionResult",
+    "Track",
     # Convenience functions
     "extract_chapters",
     "extract_chapters_to_separate_files",
