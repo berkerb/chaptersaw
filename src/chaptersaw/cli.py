@@ -155,6 +155,11 @@ def create_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Set default audio/subtitle tracks (use with --audio and/or --subtitle).",
     )
+    output_mode.add_argument(
+        "--parse-filename",
+        action="store_true",
+        help="Parse filename and show detected media info (for debugging).",
+    )
 
     # Track selection options (used with --set-default)
     track_group = parser.add_argument_group("Track selection options")
@@ -189,6 +194,23 @@ def create_parser() -> argparse.ArgumentParser:
         default="_filtered",
         metavar="SUFFIX",
         help="Suffix for output filenames in separate mode (default: _filtered).",
+    )
+    output_group.add_argument(
+        "--auto-chapters",
+        action="store_true",
+        help=(
+            "Auto-generate chapter markers in merged output based on segments. "
+            "Each extracted segment becomes a chapter. (MKV output only)"
+        ),
+    )
+    output_group.add_argument(
+        "--merge-chapter-format",
+        metavar="FORMAT",
+        help=(
+            "Format for auto-generated chapter titles. "
+            "Use {num} for segment number, {title} for original title, "
+            "{file} for source filename. Default: original chapter title."
+        ),
     )
 
     # Behavior options
@@ -488,7 +510,10 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("--set-default requires --audio, --subtitle, or --track-id")
 
     # Check if we need a filter (keyword or regex)
-    is_info_mode = args.list_chapters or args.list_tracks or args.set_default
+    is_info_mode = (
+        args.list_chapters or args.list_tracks or args.set_default
+        or args.parse_filename
+    )
     needs_filter = not is_info_mode
     if needs_filter and not args.keyword and not args.regex:
         parser.error("Either -k/--keyword or -r/--regex is required for extraction")
@@ -496,6 +521,30 @@ def main(argv: list[str] | None = None) -> int:
     # Check if we need an output mode
     if needs_filter and not args.output and not args.separate:
         parser.error("Either -o/--output or -s/--separate is required for extraction")
+
+    # Parse filename mode doesn't require files to exist
+    if args.parse_filename:
+        from chaptersaw.parser import parse_filename
+
+        for input_pattern in args.inputs:
+            info = parse_filename(input_pattern)
+            print(f"\n{input_pattern}:")
+            print(f"  Title: {info.title or '(not detected)'}")
+            if info.season is not None:
+                print(f"  Season: {info.season}")
+            if info.episode is not None:
+                print(f"  Episode: {info.episode}")
+            if info.episode_count and info.episode_count > 1:
+                print(f"  Episode Count: {info.episode_count}")
+            if info.year:
+                print(f"  Year: {info.year}")
+            if info.resolution:
+                print(f"  Resolution: {info.resolution}")
+            if info.source:
+                print(f"  Source: {info.source}")
+            if info.release_group:
+                print(f"  Release Group: {info.release_group}")
+        return 0
 
     # Resolve input files
     try:
@@ -632,6 +681,8 @@ def main(argv: list[str] | None = None) -> int:
                 on_progress=progress_callback,
                 parallel=args.parallel,
                 max_workers=args.workers,
+                auto_chapters=args.auto_chapters,
+                chapter_format=args.merge_chapter_format,
             )
 
         if rich_progress:

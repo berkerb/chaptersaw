@@ -428,6 +428,210 @@ class ChapterExtractor:
 
         return result
 
+    def _get_duration(self, input_file: Path) -> float:
+        """Get the duration of a video file in seconds.
+
+        Args:
+            input_file: Path to the video file.
+
+        Returns:
+            Duration in seconds.
+
+        Raises:
+            ChapterExtractionError: If duration cannot be determined.
+        """
+        cmd = [
+            str(self.ffprobe_path),
+            "-i",
+            str(input_file),
+            "-print_format",
+            "json",
+            "-show_format",
+            "-loglevel",
+            "error",
+        ]
+
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            data = json.loads(result.stdout)
+            duration_str = data.get("format", {}).get("duration")
+            if duration_str is None:
+                raise ChapterExtractionError(
+                    f"Could not determine duration of '{input_file}'"
+                )
+            return float(duration_str)
+        except subprocess.CalledProcessError as e:
+            raise ChapterExtractionError(
+                f"Failed to probe file '{input_file}': {e.stderr}"
+            ) from e
+        except (json.JSONDecodeError, KeyError) as e:
+            raise ChapterExtractionError(
+                f"Failed to parse duration from '{input_file}'"
+            ) from e
+
+    def write_chapters(
+        self,
+        input_file: str | Path,
+        chapters: list[Chapter],
+        replace: bool = True,
+    ) -> None:
+        """Write chapter markers to an MKV file.
+
+        Uses mkvpropedit to add or replace chapters in the file.
+
+        Args:
+            input_file: Path to the MKV file to modify.
+            chapters: List of Chapter objects to write.
+            replace: If True, replace existing chapters. If False, error if
+                chapters already exist.
+
+        Raises:
+            ChapterExtractionError: If modification fails.
+            UnsupportedFormatError: If file is not MKV format.
+        """
+        input_path = Path(input_file)
+
+        if not input_path.exists():
+            raise ChapterExtractionError(f"Input file not found: {input_path}")
+
+        if input_path.suffix.lower() != ".mkv":
+            raise UnsupportedFormatError(
+                f"write_chapters only works with MKV files, got: {input_path.suffix}"
+            )
+
+        if not self._is_mkvpropedit_available():
+            raise ChapterExtractionError(
+                "mkvpropedit not found. Please install MKVToolNix to use this feature."
+            )
+
+        # Create a temporary chapter file in the simple chapter format
+        import tempfile
+        chapter_content = self._format_chapters_simple(chapters)
+
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=".txt",
+            delete=False,
+            encoding="utf-8",
+        ) as f:
+            f.write(chapter_content)
+            chapter_file = f.name
+
+        try:
+            cmd = [
+                str(self.mkvpropedit_path),
+                str(input_path),
+                "--chapters",
+                chapter_file,
+            ]
+
+            subprocess.run(cmd, capture_output=True, check=True)
+        except subprocess.CalledProcessError as e:
+            raise ChapterExtractionError(
+                f"Failed to write chapters: {e.stderr.decode()}"
+            ) from e
+        finally:
+            # Clean up temp file
+            Path(chapter_file).unlink(missing_ok=True)
+
+    def _format_chapters_simple(self, chapters: list[Chapter]) -> str:
+        """Format chapters in the simple chapter format for mkvpropedit.
+
+        Args:
+            chapters: List of Chapter objects.
+
+        Returns:
+            String in simple chapter format.
+        """
+        lines = []
+        for i, chapter in enumerate(chapters):
+            # Format time as HH:MM:SS.mmm
+            hours = int(chapter.start_time // 3600)
+            minutes = int((chapter.start_time % 3600) // 60)
+            seconds = chapter.start_time % 60
+
+            time_str = f"{hours:02d}:{minutes:02d}:{seconds:06.3f}"
+            lines.append(f"CHAPTER{i + 1:02d}={time_str}")
+            lines.append(f"CHAPTER{i + 1:02d}NAME={chapter.title}")
+
+        return "\n".join(lines)
+
+    def _generate_merge_chapters(
+        self,
+        segment_files: list[Path],
+        file_chapters: list[tuple[Path, list[Chapter]]],
+        output_file: Path,
+        chapter_format: str | None = None,
+    ) -> None:
+        """Generate chapter markers for a merged file based on segment boundaries.
+
+        This creates chapters at the start of each segment in the merged file,
+        using the original chapter titles or a custom format.
+
+        Args:
+            segment_files: List of segment file paths in merge order.
+            file_chapters: List of (source_file, chapters) tuples.
+            output_file: The merged output file to write chapters to.
+            chapter_format: Optional format string for chapter titles.
+                Use {num} for segment number (1-based), {title} for original
+                chapter title, {file} for source filename without extension.
+        """
+        # Build a flat list of (segment_path, source_file, chapter) tuples
+        segment_info: list[tuple[Path, Path, Chapter]] = []
+        segment_idx = 0
+        for source_file, chapters in file_chapters:
+            for chapter in chapters:
+                if segment_idx < len(segment_files):
+                    segment_info.append(
+                        (segment_files[segment_idx], source_file, chapter)
+                    )
+                    segment_idx += 1
+
+        if not segment_info:
+            return
+
+        # Get duration of each segment and calculate cumulative start times
+        chapters_to_write: list[Chapter] = []
+        current_time = 0.0
+
+        for idx, (segment_path, source_file, original_chapter) in enumerate(
+            segment_info
+        ):
+            try:
+                segment_duration = self._get_duration(segment_path)
+            except ChapterExtractionError:
+                # If we can't get duration, use the original chapter duration
+                segment_duration = original_chapter.duration
+
+            # Format the chapter title
+            if chapter_format:
+                title = chapter_format.format(
+                    num=idx + 1,
+                    title=original_chapter.title,
+                    file=source_file.stem,
+                )
+            else:
+                title = original_chapter.title
+
+            end_time = current_time + segment_duration
+            chapters_to_write.append(Chapter(
+                title=title,
+                start_time=current_time,
+                end_time=end_time,
+                index=idx,
+            ))
+            current_time = end_time
+
+        # Write chapters to the output file
+        if chapters_to_write:
+            try:
+                self.write_chapters(output_file, chapters_to_write)
+                logger.info(
+                    f"Generated {len(chapters_to_write)} chapters in {output_file.name}"
+                )
+            except (ChapterExtractionError, UnsupportedFormatError) as e:
+                logger.warning(f"Could not write chapters to output: {e}")
+
     def filter_chapters_by_keyword(
         self,
         chapters: list[Chapter],
@@ -642,6 +846,8 @@ class ChapterExtractor:
         on_progress: Callable[[str, int, int], None] | None = None,
         parallel: bool = False,
         max_workers: int | None = None,
+        auto_chapters: bool = False,
+        chapter_format: str | None = None,
     ) -> list[ExtractionResult]:
         """Extract matching chapters from multiple files and merge into one output.
 
@@ -659,6 +865,11 @@ class ChapterExtractor:
             parallel: If True, use parallel processing for extraction.
             max_workers: Maximum number of worker threads for parallel processing.
                 Defaults to number of CPU cores.
+            auto_chapters: If True, automatically generate chapter markers in the
+                merged output file based on segment boundaries.
+            chapter_format: Format string for auto-generated chapter titles.
+                Use {num} for segment number, {title} for original chapter title,
+                {file} for source filename. Defaults to original chapter title.
 
         Returns:
             List of ExtractionResult objects, one per input file.
@@ -755,6 +966,15 @@ class ChapterExtractor:
                 for result in results:
                     if result.success and result.chapters_extracted:
                         result.output_file = output_path
+
+                # Generate chapters if requested
+                if auto_chapters and output_path.suffix.lower() == ".mkv":
+                    self._generate_merge_chapters(
+                        all_segments,
+                        file_chapters,
+                        output_path,
+                        chapter_format,
+                    )
 
         return results
 

@@ -26,6 +26,7 @@ classifiers = [
 ]
 dependencies = [
     "rich>=13.0",
+    "guessit>=3.8",
 ]
 
 [project.optional-dependencies]

@@ -318,3 +318,129 @@ class TestFormatSupport:
         error_msg = str(exc_info.value)
         assert ".mkv" in error_msg
         assert ".mp4" in error_msg
+
+
+class TestGenerateMergeChapters:
+    """Tests for the _generate_merge_chapters method."""
+
+    @pytest.fixture
+    def mock_ffmpeg_validation(self) -> MagicMock:
+        """Mock the ffmpeg/ffprobe validation."""
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            yield mock_run
+
+    @pytest.fixture
+    def extractor(self, mock_ffmpeg_validation: MagicMock) -> ChapterExtractor:
+        """Create an extractor instance with mocked dependencies."""
+        return ChapterExtractor()
+
+    def test_generate_merge_chapters_basic(
+        self, extractor: ChapterExtractor, tmp_path: Path
+    ) -> None:
+        """Test basic chapter generation from segments."""
+        # Create mock segment files
+        seg1 = tmp_path / "seg1.mkv"
+        seg2 = tmp_path / "seg2.mkv"
+        seg3 = tmp_path / "seg3.mkv"
+        seg1.touch()
+        seg2.touch()
+        seg3.touch()
+
+        # Create mock output file
+        output = tmp_path / "output.mkv"
+        output.touch()
+
+        # Create file_chapters structure
+        source_file = Path("source.mkv")
+        chapters = [
+            Chapter("Episode 1", 0.0, 1200.0),
+            Chapter("Episode 2", 1200.0, 2400.0),
+            Chapter("Episode 3", 2400.0, 3600.0),
+        ]
+        file_chapters = [(source_file, chapters)]
+        segment_files = [seg1, seg2, seg3]
+
+        # Mock _get_duration to return different durations
+        durations = {seg1: 1200.0, seg2: 1200.0, seg3: 1200.0}
+
+        with patch.object(extractor, "_get_duration") as mock_duration:
+            mock_duration.side_effect = lambda f: durations[f]
+            with patch.object(extractor, "write_chapters") as mock_write:
+                extractor._generate_merge_chapters(
+                    segment_files, file_chapters, output, None
+                )
+
+                # Verify write_chapters was called
+                mock_write.assert_called_once()
+                written_chapters = mock_write.call_args[0][1]
+
+                # Check chapter count and timings
+                assert len(written_chapters) == 3
+                assert written_chapters[0].title == "Episode 1"
+                assert written_chapters[0].start_time == 0.0
+                assert written_chapters[1].title == "Episode 2"
+                assert written_chapters[1].start_time == 1200.0
+                assert written_chapters[2].title == "Episode 3"
+                assert written_chapters[2].start_time == 2400.0
+
+    def test_generate_merge_chapters_with_format(
+        self, extractor: ChapterExtractor, tmp_path: Path
+    ) -> None:
+        """Test chapter generation with custom format string."""
+        seg1 = tmp_path / "seg1.mkv"
+        seg2 = tmp_path / "seg2.mkv"
+        seg1.touch()
+        seg2.touch()
+        output = tmp_path / "output.mkv"
+        output.touch()
+
+        source_file = Path("MyShow.S01E01.mkv")
+        chapters = [
+            Chapter("Part A", 0.0, 600.0),
+            Chapter("Part B", 600.0, 1200.0),
+        ]
+        file_chapters = [(source_file, chapters)]
+        segment_files = [seg1, seg2]
+
+        with patch.object(extractor, "_get_duration", return_value=600.0):
+            with patch.object(extractor, "write_chapters") as mock_write:
+                extractor._generate_merge_chapters(
+                    segment_files,
+                    file_chapters,
+                    output,
+                    chapter_format="{num}. {title} ({file})",
+                )
+
+                written_chapters = mock_write.call_args[0][1]
+                assert written_chapters[0].title == "1. Part A (MyShow.S01E01)"
+                assert written_chapters[1].title == "2. Part B (MyShow.S01E01)"
+
+    def test_generate_merge_chapters_multiple_sources(
+        self, extractor: ChapterExtractor, tmp_path: Path
+    ) -> None:
+        """Test chapter generation from multiple source files."""
+        seg1 = tmp_path / "seg1.mkv"
+        seg2 = tmp_path / "seg2.mkv"
+        seg1.touch()
+        seg2.touch()
+        output = tmp_path / "output.mkv"
+        output.touch()
+
+        # Two different source files
+        file_chapters = [
+            (Path("Episode01.mkv"), [Chapter("Episode 1", 0.0, 1200.0)]),
+            (Path("Episode02.mkv"), [Chapter("Episode 2", 0.0, 1200.0)]),
+        ]
+        segment_files = [seg1, seg2]
+
+        with patch.object(extractor, "_get_duration", return_value=1200.0):
+            with patch.object(extractor, "write_chapters") as mock_write:
+                extractor._generate_merge_chapters(
+                    segment_files, file_chapters, output, None
+                )
+
+                written_chapters = mock_write.call_args[0][1]
+                assert len(written_chapters) == 2
+                assert written_chapters[0].start_time == 0.0
+                assert written_chapters[1].start_time == 1200.0
