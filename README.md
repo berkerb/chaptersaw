@@ -9,6 +9,9 @@ Extract and merge specific chapters from video files based on chapter title keyw
 - **Exclude mode**: Filter out unwanted chapters (e.g., skip intros/credits)
 - **Merge mode**: Combine chapters from multiple files into a single output
 - **Separate mode**: Create individual output files for each input
+- **Auto-chapters**: Generate chapter markers in merged output files
+- **Track management**: List tracks, set default audio/subtitle tracks
+- **Filename parsing**: Extract show name, episode info from filenames
 - **Glob patterns**: Process multiple files with wildcards
 - **Parallel processing**: Speed up extraction with multi-threading
 - **Progress bar**: Visual feedback with rich library
@@ -19,6 +22,7 @@ Extract and merge specific chapters from video files based on chapter title keyw
 
 - Python 3.11+
 - FFmpeg (must be installed and in PATH)
+- MKVToolNix (optional, for `--set-default`, `--auto-chapters`, chapter writing)
 
 ## Installation
 
@@ -66,6 +70,25 @@ chaptersaw -i "videos/*.mkv" -k Episode -o merged.mkv --parallel
 
 # Case-sensitive matching
 chaptersaw -i "videos/*.mkv" -k Episode -o merged.mkv --case-sensitive
+
+# Auto-generate chapters when merging (each segment becomes a chapter)
+chaptersaw -i "videos/*.mkv" -k Episode -o merged.mkv --auto-chapters
+
+# Custom chapter format
+chaptersaw -i "videos/*.mkv" -k Episode -o merged.mkv --auto-chapters \
+    --merge-chapter-format "Episode {num}: {title}"
+
+# List all tracks in a file
+chaptersaw -i video.mkv --list-tracks
+
+# Set default audio and subtitle tracks by language
+chaptersaw -i video.mkv --set-default --audio jpn --subtitle eng
+
+# Set default track by ID
+chaptersaw -i video.mkv --set-default --track-id 2
+
+# Parse filename to extract media info
+chaptersaw --parse-filename "[SubsPlease] Frieren - 01-28 [1080p].mkv"
 ```
 
 ### Python API
@@ -150,6 +173,38 @@ results = extractor.extract_and_merge(
     max_workers=4,
 )
 
+# Extract and merge with auto-generated chapters
+results = extractor.extract_and_merge(
+    input_files=["video1.mkv", "video2.mkv"],
+    output_file="merged.mkv",
+    keyword="Episode",
+    auto_chapters=True,
+    chapter_format="Episode {num}: {title}",
+)
+
+# List tracks in a file
+tracks = extractor.get_tracks("video.mkv")
+for track in tracks:
+    print(f"{track.id}: {track.type} [{track.language}] - {track.codec}")
+
+# Set default audio track by language
+extractor.set_default_track("video.mkv", track_type="audio", language="jpn")
+
+# Set default tracks by language (audio and subtitle at once)
+extractor.set_default_tracks_by_language(
+    "video.mkv",
+    audio_language="jpn",
+    subtitle_language="eng",
+)
+
+# Parse filename for media info
+from chaptersaw.parser import parse_filename, MediaInfo
+
+info = parse_filename("[SubsPlease] Frieren - 01-28 [1080p].mkv")
+print(f"Title: {info.title}")           # Frieren
+print(f"Episodes: {info.episode}-{info.episode + info.episode_count - 1}")
+print(f"Resolution: {info.resolution}")  # 1080p
+
 # Check results
 for result in results:
     print(f"{result.source_file}: {result.chapters_matched} chapters matched")
@@ -179,8 +234,9 @@ except ChaptersawError as e:
 
 ```
 usage: chaptersaw [-h] [-V] -i PATH [-k KEYWORD | -r PATTERN]
-                  [-c] [-e] (-o FILE | -s | -l) [-d DIR]
-                  [--suffix SUFFIX] [-n] [-p] [-w N] [-v] [-q]
+                  [-c] [-e] (-o FILE | -s | -l | -t | --set-default | --parse-filename)
+                  [-d DIR] [--suffix SUFFIX] [--auto-chapters]
+                  [--merge-chapter-format FORMAT] [-n] [-p] [-w N] [-v] [-q]
                   [--no-progress]
 
 Extract and merge specific chapters from video files based on chapter title
@@ -199,8 +255,18 @@ Output options:
   -o, --output FILE      Output file path for merged result
   -s, --separate         Create separate output files for each input
   -l, --list-chapters    List all chapters in input files without extracting
+  -t, --list-tracks      List all audio, video, and subtitle tracks
+  --set-default          Set default audio/subtitle tracks (MKV only)
+  --parse-filename       Parse filename and show detected media info
   -d, --output-dir DIR   Output directory for separate files
   --suffix SUFFIX        Suffix for output filenames (default: _filtered)
+  --auto-chapters        Generate chapter markers in merged output (MKV only)
+  --merge-chapter-format Format for chapter titles ({num}, {title}, {file})
+
+Track selection options (used with --set-default):
+  --audio LANG           Audio language code to set as default (e.g., 'jpn')
+  --subtitle LANG        Subtitle language code to set as default (e.g., 'eng')
+  --track-id ID          Specific track ID to set as default
 
 Behavior options:
   -n, --dry-run          Show what would be done without extracting

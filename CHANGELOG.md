@@ -19,6 +19,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Progress bar with rich library for visual feedback
 - Parallel processing for faster extraction of multiple files (`--parallel`)
 - Integration tests for end-to-end testing
+- Track listing command (`--list-tracks`) to show audio, video, and subtitle tracks
+- Set default track feature (`--set-default`) with `--audio` and `--subtitle` language options
+- Auto-chapter generation for merged files (`--auto-chapters`)
+- Custom chapter format for auto-generated chapters (`--merge-chapter-format`)
+- Filename parsing with guessit library (`--parse-filename`)
+- `Track` model for representing audio/video/subtitle tracks
+- `parser` module with `MediaInfo` dataclass and `parse_filename()` function
 
 ### Changed
 - **BREAKING**: Renamed project from `mkv-chapter-extractor` to `chaptersaw`
